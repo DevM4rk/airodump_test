@@ -26,18 +26,39 @@ struct ieee80211_header {
         uint8_t        type_subtype;
         uint8_t        order_flag;
         uint16_t       duration;
-        uint8_t        rec_des_add[6];
-        uint8_t        trans_source_add[6];
-        uint8_t        bssid[6];
+        /*
+         Beacon Frame, Probe Request
+            add1 = Receiver, Destination
+            add2 = Transmitter, Source
+            add3 = BSSID
+
+         Qos Null function, Qos Data, Null function
+            add1 = Receiver, BSSID
+            add2 = Transmitter, Source, STA
+            add3 = Destination
+          */
+        uint8_t        add1[6];
+        uint8_t        add2[6];
+        uint8_t        add3[6];
         uint16_t       fragment_sequence;
 };
 
-struct data {
+struct beacon_info {    //Beacon frame, Probe Response
     uint8_t bssid[6];
-    int pwr;
-    int beacons;
+    char pwr;
+    int beacons;        // = frames
     int channel;
     int encrypt;
-    int essid_len;
-    uint8_t essid[32];
+    int essid_len;      // = probe_len
+    uint8_t essid[32];  // = probe
+};
+
+struct data_info {
+    uint8_t type;
+    uint8_t bssid[6];
+    uint8_t station[6];
+    char pwr;
+    int frames;
+    int probe_len;
+    uint8_t probe[32];
 };
