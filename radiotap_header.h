@@ -8,6 +8,18 @@
 #define WPA 3
 #define WPA2 4
 
+#define DATA 0x08
+#define PROBE_RESPONSE 0x50
+#define BEACON_FRAME 0x80
+
+#define AUTHENTICATION 0xb0
+#define DEAUTHENTICATION 0xc0
+#define ACTION 0xd0
+#define NULL_FUNCTION 0x48
+#define PROBE_REQUEST 0x40
+#define QOS_DATA 0x88
+#define QOS_NULL_FUNCTION 0xc8
+
 struct radiotap_header {
         uint8_t        it_version;     /* set to 0 */
         uint8_t        it_pad;
@@ -24,13 +36,18 @@ struct radiotap_header {
 
 struct ieee80211_header {
         uint8_t        type_subtype;
-        uint8_t        order_flag;
+        uint8_t        flags;
         uint16_t       duration;
         /*
-         Beacon Frame, Probe Request
+         Beacon Frame, Probe Request, Probe Response, Authentication, Action
             add1 = Receiver, Destination
             add2 = Transmitter, Source
             add3 = BSSID
+
+         Data
+            add1 = Rec, Des, STA
+            add2 = Trans, BSSID
+            add3 = Source
 
          Qos Null function, Qos Data, Null function
             add1 = Receiver, BSSID
@@ -43,14 +60,16 @@ struct ieee80211_header {
         uint16_t       fragment_sequence;
 };
 
-struct beacon_info {    //Beacon frame, Probe Response
+struct beacon_info {    //Beacon frame, Probe Response, Data
+    uint8_t type;
     uint8_t bssid[6];
     char pwr;
-    int beacons;        // = frames
+    int beacons;
+    int data;
     int channel;
     int encrypt;
-    int essid_len;      // = probe_len
-    uint8_t essid[32];  // = probe
+    int essid_len;
+    uint8_t essid[32];
 };
 
 struct data_info {
