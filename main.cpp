@@ -1,25 +1,28 @@
 ﻿#include <iostream>
+#include <stdio.h>
 #include <pcap.h>
 #include <map>
-#include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <cstring>
+#include <stdint.h>
 #include <unistd.h>
 #include <thread>
 #include <mutex>
+#include <time.h>
+
 #include "radiotap_header.h"
 
 //adapter : AWUS036NH
 
 using namespace std;
 
-static map<int, beacon_info> b;
-static map<int, beacon_info>::iterator b_iter;
-static map<int, data_info> d;
-static map<int, data_info>::iterator d_iter;
-static int b_map_key=1;
-static int d_map_key=1;
+static map<mac_key, beacon_info> b;
+static map<mac_key, beacon_info>::iterator b_iter;
+static map<mac_key, data_info> d;
+static map<mac_key, data_info>::iterator d_iter;
+static int ch = 1;
+static time_t start;
+static time_t now;
 uint8_t brodcast[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 uint8_t null_id[20] = { 0, };
 
@@ -42,206 +45,139 @@ int savedata(char* argv, std::mutex& mutex){
         struct ieee80211_header *ih = (struct ieee80211_header *)(packet + rh->it_length);
         uint8_t * wlh = (uint8_t *)ih + IEEE_LEN;               //wireless LAN header
         //printf("%u bytes captured \n", header->caplen);
-
+        if(rh->it_length == 13 || rh->it_length == 14) continue;
 
         //Beacon frame
-        if (ih->type_subtype == BEACON_FRAME || ih->type_subtype == PROBE_RESPONSE
-                || ih->type_subtype == DATA || ih->type_subtype == QOS_DATA){
+        if (ih->type_subtype == BEACON_FRAME /*|| ih->type_subtype == PROBE_RESPONSE
+                                        || ih->type_subtype == DATA || ih->type_subtype == QOS_DATA
+                                        ||ih->type_subtype == NULL_FUNCTION || ih->type_subtype == QOS_NULL_FUNCTION
+                                        ||ih->type_subtype == AUTHENTICATION || ih->type_subtype == DEAUTHENTICATION
+                                        ||ih->type_subtype == ACTION*/){
+
             mutex.lock();
-            uint8_t * p = wlh + FIXED_PARAMETERS_LEN;
-            int caplen = header->caplen - rh->it_length;            //all_len - rh_len
-            int Tag_type;
-            int Tag_length;
-            int offset;
-            struct beacon_info b_info;
-            b_info.beacons=1;
-            b_info.data=0;
-            b_info.type= ih->type_subtype;
+            auto b_iter = b.find(ih->add3);             //BSSID
+            if(b_iter ==b.end()){
+                uint8_t * p = wlh + FIXED_PARAMETERS_LEN;
+                int caplen = header->caplen - rh->it_length;            //all_len - rh_len
+                int Tag_type;
+                int Tag_length;
+                int offset;
+                beacon_info b_info;
 
+                b_info.pwr = rh->it_antenna_signal;
+                b_info.channel = ((rh->it_channel_frequency)-2407)/5;
 
-            //BSSID
-            //if (memcmp(ih->add3, ih->add2, 6)==0) goto beacon_end;
-            if(ih->type_subtype == DATA){
-                for (int i=0;i<6;i++) b_info.bssid[i]=ih->add2[i];      //Data add2 = BSSID
+                if (!(b_info.encrypt & (OPN | WEP | WPA | WPA2))) {
+                    if ((*(wlh+10) & 0x10) >> 4){
+                        b_info.encrypt = WEP;
+                    }
+                    else{
+                        b_info.encrypt = OPN;
+                    }
+                }
+                while (p < (uint8_t *)ih + caplen){
+                    Tag_type = p[0];
+                    Tag_length = p[1];
+
+                    if (p + 2 + Tag_length > (uint8_t *)ih + caplen){
+                        //printf("error parsing tags! \n");
+                        break;
+                    }
+                    // Find WPA and RSN tags
+                    if ((Tag_type == 0xDD && (Tag_length >= 8)
+                         && (memcmp(p + 2, "\x00\x50\xF2\x01\x01\x00", 6) == 0))
+                            || (Tag_type == 0x30)) {
+                        p += Tag_length + 2;
+                        offset = 0;
+
+                        if (Tag_type == 0xDD){          // WPA defined in vendor specific tag -> WPA1 support
+                            b_info.encrypt = WPA;
+                            offset = 4;
+                        }
+                        // RSN => WPA2
+                        if (Tag_type == 0x30){
+                            b_info.encrypt = WPA2;
+                            offset = 0;
+                        }
+                        if (Tag_length < (18 + offset)){
+                            //printf("Tag_length : %d,  18+offset : %d ", Tag_length, 18+offset );
+                            continue;
+                        }
+                    }
+                    else{
+                        p += Tag_length + 2;
+                    }
+                }
+
+                if(ih->type_subtype == BEACON_FRAME || ih->type_subtype == PROBE_RESPONSE){
+                    b_info.essid_len = *(wlh+FIXED_PARAMETERS_LEN+1);
+                    memcpy(b_info.essid, wlh+FIXED_PARAMETERS_LEN+2, b_info.essid_len);
+                }
+
+                if (ih->type_subtype == BEACON_FRAME) b_info.beacons=1;
+                if (ih->type_subtype == QOS_DATA || ih->type_subtype == DATA) b_info.data++;
+                b[ih->add3] = b_info;
             }
             else{
-                for (int i=0;i<6;i++) b_info.bssid[i]=ih->add3[i];      //add3 = BSSID
-            }
-            //printf("BSSID : ");
-            //for (int i=0;i<6;i++) printf("%02x:", b_info.bssid[i]); printf("\n");
-
-
-            //PWR
-            b_info.pwr = rh->it_antenna_signal;
-            //printf("PWR : %d dBm \n", b_info.pwr);
-
-
-            //CH
-            b_info.channel = ((rh->it_channel_frequency)-2407)/5;
-            //printf("Ch : %d \n", b_info.channel);
-
-
-            //ENC
-            b_info.encrypt = 0;    // OPN=1, WEP=2, WPA=3, WPA2=4
-            if (!(b_info.encrypt & (OPN | WEP | WPA | WPA2))) {
-                if ((*(wlh+10) & 0x10) >> 4){
-                    b_info.encrypt = WEP;
-                }
-                else{
-                    b_info.encrypt = OPN;
-                }
-            }
-
-            while (p < (uint8_t *)ih + caplen){
-                Tag_type = p[0];
-                Tag_length = p[1];
-                // printf("type :%d 0x%02x, length : %d \n ", p[0], p[0], p[1]);
-
-                if (p + 2 + Tag_length > (uint8_t *)ih + caplen){
-                    /*                printf("error parsing tags! %p vs. %p (tag:
-                            %i, length: %i,position: %i)\n", (p+2+Tag_length), (h80211+caplen),
-                            Tag_type, Tag_length, (p-h80211));
-                            exit(1);*/
-                    break;
-                }
-
-                // Find WPA and RSN tags
-                if ((Tag_type == 0xDD && (Tag_length >= 8)
-                     && (memcmp(p + 2, "\x00\x50\xF2\x01\x01\x00", 6) == 0))
-                        || (Tag_type == 0x30)) {
-
-                    p += Tag_length + 2;
-                    offset = 0;
-
-                    if (Tag_type == 0xDD){          // WPA defined in vendor specific tag -> WPA1 support
-                        b_info.encrypt = WPA;
-                        offset = 4;
-                    }
-
-                    // RSN => WPA2
-                    if (Tag_type == 0x30){
-                        b_info.encrypt = WPA2;
-                        offset = 0;
-                    }
-
-                    if (Tag_length < (18 + offset)){
-                        //printf("Tag_length : %d,  18+offset : %d ", Tag_length, 18+offset );
-                        continue;
-                    }
-                }
-                else{
-                    p += Tag_length + 2;
-                }
-            }
-
-
-            //ESSID
-            b_info.essid_len = *(wlh+FIXED_PARAMETERS_LEN+1);
-            memcpy(b_info.essid, wlh+FIXED_PARAMETERS_LEN+2, b_info.essid_len);
-            //printf("ESSID : ");
-            //for(int i=0;i<*(wlh+FIXED_PARAMETERS_LEN+1);i++) printf("%c", b_info.essid[i]);
-            //printf("\n");
-
-
-            //Beacons
-            for (b_iter = b.begin(); b_iter != b.end(); b_iter++) {
-                if( memcmp((*b_iter).second.bssid, b_info.bssid, 6) == 0 ){
-                    if (ih->type_subtype == BEACON_FRAME){
-                        (*b_iter).second.beacons ++;
-                        (*b_iter).second.encrypt = b_info.encrypt;
-                        (*b_iter).second.essid_len = b_info.essid_len;
-                        memcpy((*b_iter).second.essid, b_info.essid, b_info.essid_len);
-                    }
-                    if ((*b_iter).second.pwr < b_info.pwr) (*b_iter).second.pwr = b_info.pwr;
-                    if (ih->type_subtype == QOS_DATA || ih->type_subtype == DATA) (*b_iter).second.data ++;
-                    //printf("beacons : %d \n", (*b_iter).second.beacons);
-                    break;
-                }
-            }
-            if (b_iter == b.end()){
-                if (ih->type_subtype == PROBE_RESPONSE || ih->type_subtype == DATA) b_info.beacons=0;
-                if (ih->type_subtype == QOS_DATA || ih->type_subtype == DATA) b_info.data++;
-                b[b_map_key]=b_info;
-                b_map_key++;
+                //if (ih->type_subtype == QOS_DATA || ih->type_subtype == DATA) (*b_iter).second.data ++;
+                if (ih->type_subtype == BEACON_FRAME) (*b_iter).second.beacons ++;
+                (*b_iter).second.pwr = rh->it_antenna_signal;
             }
             mutex.unlock();
         }
 
         //Data frame
-        if (ih->type_subtype == PROBE_REQUEST || ih->type_subtype == NULL_FUNCTION
-                || ih->type_subtype == QOS_NULL_FUNCTION || ih->type_subtype == QOS_DATA
-                || ih->type_subtype == AUTHENTICATION || ih->type_subtype == ACTION){
+        if (ih->type_subtype == PROBE_REQUEST /*|| ih->type_subtype == NULL_FUNCTION
+                                                || ih->type_subtype == QOS_NULL_FUNCTION || ih->type_subtype == QOS_DATA
+                                                || ih->type_subtype == AUTHENTICATION || ih->type_subtype == ACTION*/){
             mutex.lock();
-            struct data_info d_info;
-            d_info.frames=1;
-            d_info.type= ih->type_subtype;
+            auto d_iter = d.find(ih->add2);             //station
+            if(d_iter ==d.end()){
+                data_info d_info;
+                d_info.pwr = rh->it_antenna_signal;
+                d_info.frames=1;
+                d_info.type= ih->type_subtype;
 
-            //BSSID, STATION
-            if(ih->type_subtype == QOS_DATA){
-                switch(ih->flags & 0x03){
-                case 1:{     //flag = T, 0001
-                    for (int i=0;i<6;i++) d_info.bssid[i]=ih->add1[i];      //BSSID,    add1 = BSSID
-                    for (int i=0;i<6;i++) d_info.station[i]=ih->add2[i];    //STATION,  add2 = STA
-                    break;
-                }
-                case 2:{     //flag = F, 0010
-                    for (int i=0;i<6;i++) d_info.bssid[i]=ih->add2[i];      //BSSID,    add2 = BSSID
-                    for (int i=0;i<6;i++) d_info.station[i]=ih->add1[i];    //STATION,  add1 = STA
-                    break;
-                }
-                }
-            }
-            else{            //Request, Null f, Qos Null f, Authentication, Action
-                if (memcmp(ih->add2, ih->add3, 6)==0) goto data_end;
-                for (int i=0;i<6;i++) d_info.bssid[i]=ih->add3[i];      //Null f, Qos Null f add3 = Des = BSSID
-                for (int i=0;i<6;i++) d_info.station[i]=ih->add2[i];    //add2 = Source
-            }
+                uint8_t *ptr = reinterpret_cast<uint8_t*>(&ih->add3);
+                for (int i=0;i<6;i++) d_info.bssid[i]=ptr[i];
 
-            //PWR
-            d_info.pwr = rh->it_antenna_signal;
-
-            //Probe
-            if (ih->type_subtype == PROBE_REQUEST){
-                d_info.probe_len = *(wlh+1);
-                memcpy(d_info.probe, wlh+2, d_info.probe_len);
-            }
-
-            //Frames
-            for (d_iter = d.begin(); d_iter != d.end(); d_iter++) {
-                if( memcmp((*d_iter).second.station, d_info.station, 6) == 0 ){
-                    (*d_iter).second.frames ++;
-                    if((*d_iter).second.pwr < d_info.pwr) (*d_iter).second.pwr = d_info.pwr;
-                    if ((*d_iter).second.probe_len == 0){
-                        (*d_iter).second.probe_len = d_info.probe_len;
-                        memcpy((*d_iter).second.probe, d_info.probe, d_info.probe_len);
-                    }
-                    break;
+                if (ih->type_subtype == PROBE_REQUEST){
+                    d_info.probe_len = *(wlh+1);
+                    memcpy(d_info.probe, wlh+2, d_info.probe_len);
                 }
+printf("%02x" , d_info.probe_len);
+                d[ih->add2] = d_info;
             }
-            if (d_iter == d.end()){
-                d[d_map_key]=d_info;
-                d_map_key++;
+            else{
+                (*d_iter).second.frames ++;
+                (*d_iter).second.pwr = rh->it_antenna_signal;
             }
-data_end:
             mutex.unlock();
         }
+
     }
     pcap_close(handle);
     return 0;
 }
 
+void print_mac(mac_key mac){
+    uint8_t *ptr = reinterpret_cast<uint8_t*>(&mac);
+    for (int i=0;i<6;i++) {
+        printf("%02X", ptr[i]);
+        if (i<5) printf(":");
+    }
+}
+
 void printdata(std::mutex& mutex){
     while(1){
         mutex.lock();
-
+        time(&now);
+        printf("\n CH %d ][ Elapsed: %d s ][ %s\n\n",ch ,now-start ,ctime(&now));
         //Print Beacon frame
         printf("      BSSID \t   PWR \t Beacons     #Data, \tCH \tENC \tESSID \n\n");
 
         for( b_iter= b.begin(); b_iter != b.end(); b_iter++){
-            for (int i=0;i<6;i++) {
-                printf("%02X", (*b_iter).second.bssid[i]);
-                if (i<5) printf(":");
-            }
+            print_mac(b_iter->first);
 
             printf("  %d \t      %d \t %d \t%d \t",(*b_iter).second.pwr
                    ,(*b_iter).second.beacons ,(*b_iter).second.data, (*b_iter).second.channel);
@@ -264,21 +200,15 @@ void printdata(std::mutex& mutex){
                 break;
             }
             }
+
             if(memcmp((*b_iter).second.essid, null_id, (*b_iter).second.essid_len) == 0){
                 printf("<length: %d>", (*b_iter).second.essid_len);
             }
             else {
-                if((*b_iter).second.beacons ==0) {
-                    printf("<length:  0>");
-                }
-                else{
-                    for(int i=0;i<(*b_iter).second.essid_len;i++){
-                        printf("%c", (*b_iter).second.essid[i]);
-                    }
+                for(int i=0;i<(*b_iter).second.essid_len;i++){
+                    printf("%c", (*b_iter).second.essid[i]);
                 }
             }
-
-
             printf("\n");
         }
 
@@ -297,10 +227,7 @@ void printdata(std::mutex& mutex){
                 printf("  ");
             }
 
-            for (int i=0;i<6;i++) {
-                printf("%02X", (*d_iter).second.station[i]);
-                if (i<5) printf(":");
-            }
+            print_mac(d_iter->first);
 
             printf("\t%d \t   %d\t",(*d_iter).second.pwr ,(*d_iter).second.frames);
 
@@ -317,6 +244,20 @@ void printdata(std::mutex& mutex){
     }
 }
 
+void ch_hopping(char* dev){
+    while (true) {
+        char cmd[32] = "iwconfig ";
+        strcat(cmd, dev);
+        strcat(cmd, " channel ");
+        sprintf(cmd + 23, "%d", ch);
+        system(cmd);
+        sleep(1);
+        ch += 6;
+        ch %= 13;
+        if(!ch) ch = 13;
+    }
+}
+
 void usage() {
     printf("syntax: airodump_test <interface>\n");
     printf("sample: airodump_test wlan0\n");
@@ -328,12 +269,16 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    char* dev = argv[1];
+    time(&start);
     std::mutex mutex;
-    thread t1(savedata,argv[1],ref(mutex));
-    thread t2(printdata,ref(mutex));
+    thread t1(savedata,dev,ref(mutex));
+    thread t2(ch_hopping,dev);
+    thread t3(printdata,ref(mutex));
 
     t1.join();
     t2.join();
+    t3.join();
 
     return 0;
 }

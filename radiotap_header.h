@@ -20,6 +20,14 @@
 #define QOS_DATA 0x88
 #define QOS_NULL_FUNCTION 0xc8
 
+struct mac_key{     //BSSID
+    uint64_t mac:48;                                        //what : ?
+} __attribute__((__packed__));
+
+bool operator<(mac_key const& m1, mac_key const& m2){       //const o x ?
+    return m1.mac < m2.mac;
+}
+
 struct radiotap_header {
         uint8_t        it_version;     /* set to 0 */
         uint8_t        it_pad;
@@ -39,7 +47,7 @@ struct ieee80211_header {
         uint8_t        flags;
         uint16_t       duration;
         /*
-         Beacon Frame, Probe Request, Probe Response, Authentication, Action
+         Beacon Frame, Probe Request, Probe Response, Authentication, Deauthentication, Action
             add1 = Receiver, Destination
             add2 = Transmitter, Source
             add3 = BSSID
@@ -54,30 +62,31 @@ struct ieee80211_header {
             add2 = Transmitter, Source, STA
             add3 = Destination
           */
-        uint8_t        add1[6];
-        uint8_t        add2[6];
-        uint8_t        add3[6];
+        mac_key add1;           //6byte
+        mac_key add2;
+        mac_key add3;
         uint16_t       fragment_sequence;
 };
 
-struct beacon_info {    //Beacon frame, Probe Response, Data
-    uint8_t type;
-    uint8_t bssid[6];
-    char pwr;
-    int beacons;
-    int data;
-    int channel;
-    int encrypt;
-    int essid_len;
+#pragma pack(push, 1)
+
+struct beacon_info {    //Beacon frame, Probe Response, Data, Qos Data
+    char pwr=0;
+    int beacons=0;
+    int data=0;
+    int channel=0;
+    int encrypt=0;        // OPN=1, WEP=2, WPA=3, WPA2=4
+    int essid_len=0;
     uint8_t essid[32];
 };
 
 struct data_info {
-    uint8_t type;
+    uint8_t type=0;
     uint8_t bssid[6];
-    uint8_t station[6];
-    char pwr;
-    int frames;
-    int probe_len;
+    char pwr=0;
+    int frames=0;
+    int probe_len=0;
     uint8_t probe[32];
 };
+
+#pragma pack(pop)
